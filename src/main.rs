@@ -509,7 +509,7 @@ impl<'a> FilteredMultiSelect<'a> {
             );
             render.render_multi_select(
                 self.prompt.as_deref(),
-                if search_mode { Some(&query) } else { None },
+                if query.is_empty() { None } else { Some(&query) },
                 &self.items,
                 &visible_indexes,
                 &checked,
@@ -522,17 +522,9 @@ impl<'a> FilteredMultiSelect<'a> {
             match term.read_key()? {
                 Key::Char('/') if !search_mode => {
                     search_mode = true;
-                    query.clear();
-                    visible_indexes = filtered_item_indexes(&self.items, &query);
-                    selected_visible_index = 0;
-                    current_page = 0;
                 }
                 Key::Escape if search_mode => {
                     search_mode = false;
-                    query.clear();
-                    visible_indexes = filtered_item_indexes(&self.items, &query);
-                    selected_visible_index = 0;
-                    current_page = 0;
                 }
                 Key::Backspace if search_mode => {
                     query.pop();

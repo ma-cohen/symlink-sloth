@@ -9,11 +9,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use dialoguer::{
-    console::{Key, Term},
-    theme::ColorfulTheme,
-    Confirm, MultiSelect,
-};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
 
 #[derive(Parser)]
 #[command(
@@ -215,138 +211,30 @@ fn choose_folders_to_link(
 ) -> Result<Vec<CandidateFolder>> {
     assert_interactive("Use --all to link every available folder in non-interactive shells.")?;
 
-    let items = folder_selection_items(candidates);
-    let selected_indexes = choose_folder_indexes(
-        &format!(
+    let items = candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{} -> {}",
+                candidate.name,
+                path_to_display(&candidate.target_relative)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let selected_indexes = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
             "Choose folders from {} to symlink here",
             display_path(search_root)?
-        ),
-        &items,
-    )
-    .context("failed to read folder selection")?;
+        ))
+        .items(&items)
+        .interact()
+        .context("failed to read folder selection")?;
 
     Ok(selected_indexes
         .into_iter()
         .map(|index| candidates[index].clone())
         .collect())
-}
-
-fn choose_folder_indexes(prompt: &str, items: &[String]) -> Result<Vec<usize>> {
-    let term = Term::stderr();
-
-    if !term.is_term() {
-        return Err(anyhow!(
-            "Use --all to link every available folder in non-interactive shells."
-        ));
-    }
-
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut highlighted = 0;
-    let mut checked = vec![false; items.len()];
-    let mut rendered_lines = 0;
-
-    term.hide_cursor()?;
-    let _cursor_guard = CursorVisibilityGuard::new(&term);
-
-    loop {
-        clear_rendered_lines(&term, rendered_lines)?;
-        rendered_lines = render_folder_selection(&term, prompt, items, &checked, highlighted)?;
-
-        match term.read_key()? {
-            Key::ArrowDown | Key::Tab | Key::Char('j') => {
-                highlighted = (highlighted + 1) % items.len();
-            }
-            Key::ArrowUp | Key::BackTab | Key::Char('k') => {
-                highlighted = (highlighted + items.len() - 1) % items.len();
-            }
-            Key::Char(' ') => {
-                checked[highlighted] = !checked[highlighted];
-            }
-            Key::Char('a') => {
-                let should_check = !checked.iter().all(|is_checked| *is_checked);
-                checked.fill(should_check);
-            }
-            Key::Escape | Key::Char('q') => {
-                clear_rendered_lines(&term, rendered_lines)?;
-                return Ok(Vec::new());
-            }
-            Key::Enter => {
-                clear_rendered_lines(&term, rendered_lines)?;
-                return Ok(finalize_folder_selection(&checked, highlighted));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn folder_selection_items(candidates: &[CandidateFolder]) -> Vec<String> {
-    candidates
-        .iter()
-        .map(|candidate| candidate.name.clone())
-        .collect()
-}
-
-fn render_folder_selection(
-    term: &Term,
-    prompt: &str,
-    items: &[String],
-    checked: &[bool],
-    highlighted: usize,
-) -> io::Result<usize> {
-    term.write_line(&format!("? {prompt}"))?;
-    term.write_line("  Space: check multiple | Enter: link checked or highlighted | q: cancel")?;
-
-    for (index, item) in items.iter().enumerate() {
-        let cursor = if index == highlighted { ">" } else { " " };
-        let marker = if checked[index] { "[x]" } else { "[ ]" };
-
-        term.write_line(&format!("{cursor} {marker} {item}"))?;
-    }
-
-    term.flush()?;
-    Ok(items.len() + 2)
-}
-
-fn clear_rendered_lines(term: &Term, line_count: usize) -> io::Result<()> {
-    if line_count > 0 {
-        term.clear_last_lines(line_count)?;
-    }
-
-    Ok(())
-}
-
-fn finalize_folder_selection(checked: &[bool], highlighted: usize) -> Vec<usize> {
-    let selected = checked
-        .iter()
-        .enumerate()
-        .filter_map(|(index, is_checked)| is_checked.then_some(index))
-        .collect::<Vec<_>>();
-
-    if selected.is_empty() && highlighted < checked.len() {
-        vec![highlighted]
-    } else {
-        selected
-    }
-}
-
-struct CursorVisibilityGuard<'a> {
-    term: &'a Term,
-}
-
-impl<'a> CursorVisibilityGuard<'a> {
-    fn new(term: &'a Term) -> Self {
-        Self { term }
-    }
-}
-
-impl Drop for CursorVisibilityGuard<'_> {
-    fn drop(&mut self) {
-        let _ = self.term.show_cursor();
-        let _ = self.term.flush();
-    }
 }
 
 fn choose_symlinks_to_remove(symlinks: &[SymlinkEntry]) -> Result<Vec<SymlinkEntry>> {
@@ -662,34 +550,6 @@ mod tests {
         assert_eq!(get_search_root(&nested, 2)?, temp.path());
 
         Ok(())
-    }
-
-    #[test]
-    fn folder_selection_items_show_names_only() {
-        let candidates = vec![CandidateFolder {
-            name: "shared-ui".to_string(),
-            target_relative: PathBuf::from("../shared-ui"),
-            destination_path: PathBuf::from("shared-ui"),
-            destination_exists: false,
-        }];
-
-        assert_eq!(folder_selection_items(&candidates), vec!["shared-ui"]);
-    }
-
-    #[test]
-    fn enter_without_checked_folders_selects_highlighted_folder() {
-        assert_eq!(
-            finalize_folder_selection(&[false, false, false], 1),
-            vec![1]
-        );
-    }
-
-    #[test]
-    fn checked_folders_take_precedence_over_highlighted_folder() {
-        assert_eq!(
-            finalize_folder_selection(&[true, false, true], 1),
-            vec![0, 2]
-        );
     }
 
     #[test]

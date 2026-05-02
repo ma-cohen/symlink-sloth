@@ -37,6 +37,14 @@ After installation, the `sloth` command is available in your terminal:
 sloth --help
 ```
 
+Update an existing Sloth install to the latest version from GitHub:
+
+```sh
+cargo install --git https://github.com/ma-cohen/symlink-sloth sloth --force
+```
+
+The `--force` flag replaces the previously installed `sloth` binary.
+
 ## Usage
 
 Link sibling folders into the current folder:

@@ -95,6 +95,7 @@ fn run() -> Result<()> {
 fn run_add(args: AddArgs) -> Result<()> {
     let cwd = env::current_dir().context("failed to read current directory")?;
     let search_root = get_search_root(&cwd, args.levels)?;
+    let show_target_paths = !is_sibling_search(&cwd, &search_root);
     let candidates = get_candidate_folders(&cwd, &search_root)?;
     let linkable_candidates = candidates
         .iter()
@@ -122,7 +123,7 @@ fn run_add(args: AddArgs) -> Result<()> {
     let selected = if args.all {
         linkable_candidates
     } else {
-        choose_folders_to_link(&linkable_candidates, &search_root)?
+        choose_folders_to_link(&linkable_candidates, &search_root, show_target_paths)?
     };
 
     if selected.is_empty() {
@@ -131,7 +132,7 @@ fn run_add(args: AddArgs) -> Result<()> {
     }
 
     for candidate in selected {
-        create_directory_symlink(&candidate, args.dry_run)?;
+        create_directory_symlink(&candidate, args.dry_run, show_target_paths)?;
     }
 
     Ok(())
@@ -208,18 +209,13 @@ fn run_status() -> Result<()> {
 fn choose_folders_to_link(
     candidates: &[CandidateFolder],
     search_root: &Path,
+    show_target_paths: bool,
 ) -> Result<Vec<CandidateFolder>> {
     assert_interactive("Use --all to link every available folder in non-interactive shells.")?;
 
     let items = candidates
         .iter()
-        .map(|candidate| {
-            format!(
-                "{} -> {}",
-                candidate.name,
-                path_to_display(&candidate.target_relative)
-            )
-        })
+        .map(|candidate| candidate_link_display(candidate, show_target_paths))
         .collect::<Vec<_>>();
 
     let selected_indexes = MultiSelect::with_theme(&ColorfulTheme::default())
@@ -257,7 +253,11 @@ fn choose_symlinks_to_remove(symlinks: &[SymlinkEntry]) -> Result<Vec<SymlinkEnt
         .collect())
 }
 
-fn create_directory_symlink(candidate: &CandidateFolder, dry_run: bool) -> Result<()> {
+fn create_directory_symlink(
+    candidate: &CandidateFolder,
+    dry_run: bool,
+    show_target_paths: bool,
+) -> Result<()> {
     if path_exists(&candidate.destination_path)? {
         println!("Skipped {}: destination already exists.", candidate.name);
         return Ok(());
@@ -265,9 +265,8 @@ fn create_directory_symlink(candidate: &CandidateFolder, dry_run: bool) -> Resul
 
     if dry_run {
         println!(
-            "Would link {} -> {}",
-            candidate.name,
-            path_to_display(&candidate.target_relative)
+            "Would link {}",
+            candidate_link_display(candidate, show_target_paths)
         );
         return Ok(());
     }
@@ -275,9 +274,8 @@ fn create_directory_symlink(candidate: &CandidateFolder, dry_run: bool) -> Resul
     create_dir_symlink(&candidate.target_relative, &candidate.destination_path)
         .with_context(|| format!("failed to link {}", candidate.name))?;
     println!(
-        "Linked {} -> {}",
-        candidate.name,
-        path_to_display(&candidate.target_relative)
+        "Linked {}",
+        candidate_link_display(candidate, show_target_paths)
     );
 
     Ok(())
@@ -408,6 +406,24 @@ fn get_search_root(cwd: &Path, levels: usize) -> Result<PathBuf> {
     }
 
     Ok(search_root)
+}
+
+fn is_sibling_search(cwd: &Path, search_root: &Path) -> bool {
+    cwd.parent()
+        .map(|parent| parent == search_root)
+        .unwrap_or(false)
+}
+
+fn candidate_link_display(candidate: &CandidateFolder, show_target_paths: bool) -> String {
+    if show_target_paths {
+        format!(
+            "{} -> {}",
+            candidate.name,
+            path_to_display(&candidate.target_relative)
+        )
+    } else {
+        candidate.name.clone()
+    }
 }
 
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
@@ -548,6 +564,41 @@ mod tests {
 
         assert_eq!(get_search_root(&nested, 1)?, temp.path().join("one"));
         assert_eq!(get_search_root(&nested, 2)?, temp.path());
+
+        Ok(())
+    }
+
+    #[test]
+    fn sibling_search_uses_name_only_for_candidate_display() -> Result<()> {
+        let temp = tempdir()?;
+        let app = temp.path().join("app");
+        fs::create_dir(&app)?;
+
+        assert!(is_sibling_search(&app, temp.path()));
+
+        let candidate = CandidateFolder {
+            name: "shared-ui".to_string(),
+            target_relative: PathBuf::from("../shared-ui"),
+            destination_path: app.join("shared-ui"),
+            destination_exists: false,
+        };
+
+        assert_eq!(candidate_link_display(&candidate, false), "shared-ui");
+        assert_eq!(
+            candidate_link_display(&candidate, true),
+            "shared-ui -> ../shared-ui"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn non_sibling_search_keeps_candidate_target_path_visible() -> Result<()> {
+        let temp = tempdir()?;
+        let nested = temp.path().join("one").join("two");
+        fs::create_dir_all(&nested)?;
+
+        assert!(!is_sibling_search(&nested, temp.path()));
 
         Ok(())
     }

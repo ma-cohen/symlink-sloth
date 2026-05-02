@@ -21,15 +21,14 @@ app/
 
 ## Requirements
 
-- Node.js 20.12 or newer
-- npm
+- Rust and Cargo
 
 ## Install From GitHub
 
 Install the CLI globally from this GitHub repo:
 
 ```sh
-npm install -g github:<github-user>/symlink-sloth
+cargo install --git https://github.com/ma-cohen/symlink-sloth sloth
 ```
 
 After installation, the `sloth` command is available in your terminal:
@@ -37,8 +36,6 @@ After installation, the `sloth` command is available in your terminal:
 ```sh
 sloth --help
 ```
-
-Replace `<github-user>` with the owner of the repo.
 
 ## Usage
 
@@ -110,21 +107,27 @@ Sloth keeps the filesystem behavior conservative:
 
 ## Local Development
 
-Install dependencies:
+Build the CLI:
 
 ```sh
-npm install
+cargo build
 ```
 
 Run the CLI locally:
 
 ```sh
-node bin/sloth.js --help
+cargo run -- --help
 ```
 
 You can also link it globally while developing:
 
 ```sh
-npm link
+cargo install --path .
 sloth --help
+```
+
+Run tests:
+
+```sh
+cargo test
 ```

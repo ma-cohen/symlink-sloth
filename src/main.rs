@@ -509,7 +509,7 @@ impl<'a> FilteredMultiSelect<'a> {
             );
             render.render_multi_select(
                 self.prompt.as_deref(),
-                if query.is_empty() { None } else { Some(&query) },
+                search_prompt_state(&query, search_mode),
                 &self.items,
                 &visible_indexes,
                 &checked,
@@ -643,7 +643,7 @@ impl<'a> PromptRenderer<'a> {
     fn render_multi_select(
         &mut self,
         prompt: Option<&str>,
-        query: Option<&str>,
+        search_state: SearchPromptState<'_>,
         items: &[String],
         visible_indexes: &[usize],
         checked: &[bool],
@@ -655,7 +655,7 @@ impl<'a> PromptRenderer<'a> {
 
         if let Some(prompt) = prompt {
             self.write_formatted_line(|theme, buffer| {
-                let prompt = prompt_with_search(prompt, query);
+                let prompt = prompt_with_search(prompt, search_state);
                 theme.format_multi_select_prompt(buffer, &prompt)?;
 
                 let pages = page_count(visible_indexes.len(), capacity);
@@ -711,6 +711,13 @@ impl<'a> PromptRenderer<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchPromptState<'a> {
+    Hidden,
+    Searching(&'a str),
+    Filtering(&'a str),
+}
+
 fn filtered_item_indexes(items: &[String], query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
 
@@ -731,10 +738,21 @@ fn selected_item_indexes(checked: &[bool]) -> Vec<usize> {
         .collect()
 }
 
-fn prompt_with_search(prompt: &str, query: Option<&str>) -> String {
-    match query {
-        Some(query) => format!("{prompt} /{query}"),
-        None => prompt.to_string(),
+fn search_prompt_state(query: &str, search_mode: bool) -> SearchPromptState<'_> {
+    if search_mode {
+        SearchPromptState::Searching(query)
+    } else if query.is_empty() {
+        SearchPromptState::Hidden
+    } else {
+        SearchPromptState::Filtering(query)
+    }
+}
+
+fn prompt_with_search(prompt: &str, search_state: SearchPromptState<'_>) -> String {
+    match search_state {
+        SearchPromptState::Hidden => prompt.to_string(),
+        SearchPromptState::Searching(query) => format!("{prompt} (search: /{query})"),
+        SearchPromptState::Filtering(query) => format!("{prompt} (filter: /{query})"),
     }
 }
 
@@ -993,6 +1011,30 @@ mod tests {
         let checked = vec![true, false, true, false];
 
         assert_eq!(selected_item_indexes(&checked), vec![0, 2]);
+    }
+
+    #[test]
+    fn prompt_shows_when_search_mode_is_active() {
+        assert_eq!(
+            prompt_with_search("Choose folders", SearchPromptState::Searching("")),
+            "Choose folders (search: /)"
+        );
+        assert_eq!(
+            prompt_with_search("Choose folders", SearchPromptState::Searching("api")),
+            "Choose folders (search: /api)"
+        );
+    }
+
+    #[test]
+    fn prompt_shows_when_filter_is_active_but_search_mode_is_not() {
+        assert_eq!(
+            prompt_with_search("Choose folders", search_prompt_state("api", false)),
+            "Choose folders (filter: /api)"
+        );
+        assert_eq!(
+            prompt_with_search("Choose folders", search_prompt_state("", false)),
+            "Choose folders"
+        );
     }
 
     #[test]

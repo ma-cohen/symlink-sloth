@@ -77,7 +77,7 @@ Remove selected symlinks from the current folder:
 sloth remove
 ```
 
-In interactive `add` and `remove` lists, press `/` to search, type to filter the list, press `Esc` to stop typing while keeping the filter, and press `Space` to select items. To clear the filter, enter search again and delete the query with `Backspace`.
+In interactive `add` and `remove` lists, press `/` to search and type to filter the list. The prompt shows `(search: /query)` while typing; press `Esc` to return to normal selection mode, where the prompt shows `(filter: /query)`. Press `Space` to select items. To clear the filter, enter search again and delete the query with `Backspace`.
 
 Remove all symlinks from the current folder:
 

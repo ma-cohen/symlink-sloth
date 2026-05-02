@@ -1,8 +1,8 @@
 # Symlink Sloth
 
-Sloth is a tiny CLI for quickly adding and removing symlinks to sibling repositories from the folder you are currently in.
+Sloth is a tiny CLI for quickly adding and removing symlinks to folders from the folder you are currently in.
 
-It is useful when you keep related repos next to each other and want to link some of them into the current project while you work.
+It is useful when you keep related repos next to each other, or in another folder, and want to link some of them into the current project while you work.
 
 ```text
 Repos/
@@ -53,10 +53,12 @@ Link sibling folders into the current folder:
 sloth add
 ```
 
-Choose from a higher parent folder:
+Choose from another folder:
 
 ```sh
-sloth add --levels 2
+sloth add ~/repos
+sloth add ../shared
+sloth add /opt/projects
 ```
 
 Link every available sibling folder without prompting:

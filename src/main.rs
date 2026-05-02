@@ -19,7 +19,7 @@ use dialoguer::{
 #[command(
     name = "sloth",
     version,
-    about = "Add and remove symlinks to sibling repositories from your current folder."
+    about = "Add and remove symlinks to folders from your current folder."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Choose sibling folders and symlink them into the current folder.
+    /// Choose folders and symlink them into the current folder.
     Add(AddArgs),
     /// Remove symlinks from the current folder.
     #[command(alias = "rm", alias = "delete", alias = "unlink")]
@@ -39,9 +39,9 @@ enum Commands {
 
 #[derive(Args)]
 struct AddArgs {
-    /// How many parent levels to search upward.
-    #[arg(short = 'l', long, default_value_t = 1, value_parser = parse_positive_usize)]
-    levels: usize,
+    /// Folder whose child folders should be offered for linking.
+    #[arg(value_name = "SOURCE")]
+    source: Option<PathBuf>,
     /// Link every available folder without prompting.
     #[arg(long)]
     all: bool,
@@ -98,8 +98,9 @@ fn run() -> Result<()> {
 
 fn run_add(args: AddArgs) -> Result<()> {
     let cwd = env::current_dir().context("failed to read current directory")?;
-    let search_root = get_search_root(&cwd, args.levels)?;
-    let show_target_paths = !is_sibling_search(&cwd, &search_root);
+    let source_was_provided = args.source.is_some();
+    let search_root = get_search_root(&cwd, args.source.as_deref())?;
+    let show_target_paths = source_was_provided || !is_sibling_search(&cwd, &search_root);
     let candidates = get_candidate_folders(&cwd, &search_root)?;
     let linkable_candidates = candidates
         .iter()
@@ -388,28 +389,81 @@ fn get_symlinks(cwd: &Path) -> Result<Vec<SymlinkEntry>> {
     Ok(symlinks)
 }
 
-fn get_search_root(cwd: &Path, levels: usize) -> Result<PathBuf> {
-    let mut search_root = cwd.to_path_buf();
+fn get_search_root(cwd: &Path, source: Option<&Path>) -> Result<PathBuf> {
+    let home = home_dir();
+    get_search_root_with_home(cwd, source, home.as_deref())
+}
 
-    for _ in 0..levels {
-        let next_root = search_root.parent().ok_or_else(|| {
+fn get_search_root_with_home(
+    cwd: &Path,
+    source: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    let search_root = match source {
+        Some(source) => resolve_source_path(cwd, source, home)?,
+        None => cwd.parent().map(Path::to_path_buf).ok_or_else(|| {
             anyhow!(
-                "Cannot search {levels} levels up from {}.",
+                "Cannot search sibling folders from {} because it has no parent.",
                 display_path(cwd).unwrap_or_else(|_| cwd.display().to_string())
             )
-        })?;
+        })?,
+    };
 
-        if next_root == search_root {
-            return Err(anyhow!(
-                "Cannot search {levels} levels up from {}.",
-                display_path(cwd).unwrap_or_else(|_| cwd.display().to_string())
-            ));
-        }
-
-        search_root = next_root.to_path_buf();
-    }
+    ensure_directory(&search_root)?;
 
     Ok(search_root)
+}
+
+fn resolve_source_path(cwd: &Path, source: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    if is_home_relative_path(source) {
+        let home = home.ok_or_else(|| {
+            anyhow!(
+                "Cannot expand {} because HOME is not set.",
+                path_to_display(source)
+            )
+        })?;
+        return Ok(expand_home_path(source, home));
+    }
+
+    if source.is_absolute() {
+        Ok(source.to_path_buf())
+    } else {
+        Ok(cwd.join(source))
+    }
+}
+
+fn is_home_relative_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Normal(component)) if component == OsStr::new("~")
+    )
+}
+
+fn expand_home_path(path: &Path, home: &Path) -> PathBuf {
+    let mut expanded = home.to_path_buf();
+
+    for component in path.components().skip(1) {
+        expanded.push(component.as_os_str());
+    }
+
+    expanded
+}
+
+fn ensure_directory(path: &Path) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+
+    if !metadata.is_dir() {
+        return Err(anyhow!("{} is not a directory.", path.display()));
+    }
+
+    Ok(())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn is_sibling_search(cwd: &Path, search_root: &Path) -> bool {
@@ -802,18 +856,6 @@ fn rendered_line_height(line: &str, term: &Term) -> usize {
         .sum()
 }
 
-fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| "must be a positive integer".to_string())?;
-
-    if parsed == 0 {
-        return Err("must be a positive integer".to_string());
-    }
-
-    Ok(parsed)
-}
-
 fn read_sorted_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
     let mut entries = fs::read_dir(path)
         .with_context(|| format!("failed to read {}", path.display()))?
@@ -933,13 +975,62 @@ mod tests {
     }
 
     #[test]
-    fn search_root_walks_up_requested_levels() -> Result<()> {
+    fn default_search_root_is_parent_folder() -> Result<()> {
         let temp = tempdir()?;
-        let nested = temp.path().join("one").join("two");
-        fs::create_dir_all(&nested)?;
+        let app = temp.path().join("app");
+        fs::create_dir(&app)?;
 
-        assert_eq!(get_search_root(&nested, 1)?, temp.path().join("one"));
-        assert_eq!(get_search_root(&nested, 2)?, temp.path());
+        assert_eq!(get_search_root_with_home(&app, None, None)?, temp.path());
+
+        Ok(())
+    }
+
+    #[test]
+    fn relative_source_path_resolves_from_current_folder() -> Result<()> {
+        let temp = tempdir()?;
+        let app = temp.path().join("app");
+        let repos = temp.path().join("repos");
+        fs::create_dir(&app)?;
+        fs::create_dir(&repos)?;
+
+        assert_eq!(
+            get_search_root_with_home(&app, Some(Path::new("../repos")), None)?,
+            app.join("../repos")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_source_path_is_used_as_search_root() -> Result<()> {
+        let temp = tempdir()?;
+        let app = temp.path().join("app");
+        let repos = temp.path().join("repos");
+        fs::create_dir(&app)?;
+        fs::create_dir(&repos)?;
+
+        assert_eq!(
+            get_search_root_with_home(&app, Some(repos.as_path()), None)?,
+            repos
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn home_relative_source_path_expands_to_home_folder() -> Result<()> {
+        let temp = tempdir()?;
+        let app = temp.path().join("app");
+        let home = temp.path().join("home");
+        let repos = home.join("repos");
+        fs::create_dir(&app)?;
+        fs::create_dir(&home)?;
+        fs::create_dir(&repos)?;
+
+        assert_eq!(
+            get_search_root_with_home(&app, Some(Path::new("~/repos")), Some(&home))?,
+            repos
+        );
 
         Ok(())
     }

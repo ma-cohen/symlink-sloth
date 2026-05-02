@@ -2,7 +2,7 @@
 name = "sloth"
 version = "0.1.0"
 edition = "2021"
-description = "A tiny CLI for linking sibling repositories into your current folder."
+description = "A tiny CLI for linking folders into your current folder."
 license = "MIT"
 
 [[bin]]

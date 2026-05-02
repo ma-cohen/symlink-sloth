@@ -526,6 +526,15 @@ impl<'a> FilteredMultiSelect<'a> {
                 Key::Escape if search_mode => {
                     search_mode = false;
                 }
+                Key::Escape => {
+                    if self.clear {
+                        render.clear()?;
+                    }
+
+                    term.flush()?;
+
+                    return Ok(Vec::new());
+                }
                 Key::Backspace if search_mode => {
                     query.pop();
                     visible_indexes = filtered_item_indexes(&self.items, &query);

@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::OsStr,
-    fs,
+    fmt, fs,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     process,
@@ -9,7 +9,11 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
+use dialoguer::{
+    console::{measure_text_width, Key, Term},
+    theme::{ColorfulTheme, Theme},
+    Confirm,
+};
 
 #[derive(Parser)]
 #[command(
@@ -218,7 +222,7 @@ fn choose_folders_to_link(
         .map(|candidate| candidate_link_display(candidate, show_target_paths))
         .collect::<Vec<_>>();
 
-    let selected_indexes = MultiSelect::with_theme(&ColorfulTheme::default())
+    let selected_indexes = FilteredMultiSelect::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
             "Choose folders from {} to symlink here",
             display_path(search_root)?
@@ -241,7 +245,7 @@ fn choose_symlinks_to_remove(symlinks: &[SymlinkEntry]) -> Result<Vec<SymlinkEnt
         .map(|symlink| format!("{} -> {}", symlink.name, symlink.target_display))
         .collect::<Vec<_>>();
 
-    let selected_indexes = MultiSelect::with_theme(&ColorfulTheme::default())
+    let selected_indexes = FilteredMultiSelect::with_theme(&ColorfulTheme::default())
         .with_prompt("Choose symlinks to remove")
         .items(&items)
         .interact()
@@ -426,6 +430,359 @@ fn candidate_link_display(candidate: &CandidateFolder, show_target_paths: bool) 
     }
 }
 
+#[derive(Clone)]
+struct FilteredMultiSelect<'a> {
+    defaults: Vec<bool>,
+    items: Vec<String>,
+    prompt: Option<String>,
+    report: bool,
+    clear: bool,
+    max_length: Option<usize>,
+    theme: &'a dyn Theme,
+}
+
+impl<'a> FilteredMultiSelect<'a> {
+    fn with_theme(theme: &'a dyn Theme) -> Self {
+        Self {
+            defaults: Vec::new(),
+            items: Vec::new(),
+            prompt: None,
+            report: true,
+            clear: true,
+            max_length: None,
+            theme,
+        }
+    }
+
+    fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
+    fn items<T, I>(mut self, items: I) -> Self
+    where
+        T: ToString,
+        I: IntoIterator<Item = T>,
+    {
+        for item in items {
+            self.items.push(item.to_string());
+            self.defaults.push(false);
+        }
+
+        self
+    }
+
+    fn interact(self) -> Result<Vec<usize>> {
+        self.interact_on(&Term::stderr())
+    }
+
+    fn interact_on(self, term: &Term) -> Result<Vec<usize>> {
+        if !term.is_term() {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "not a terminal").into());
+        }
+
+        if self.items.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Empty list of items given to `FilteredMultiSelect`",
+            )
+            .into());
+        }
+
+        let mut render = PromptRenderer::new(term, self.theme);
+        let mut checked = self.defaults.clone();
+        let mut query = String::new();
+        let mut search_mode = false;
+        let mut visible_indexes = filtered_item_indexes(&self.items, &query);
+        let mut selected_visible_index = 0;
+        let mut current_page = 0;
+
+        let _cursor_guard = CursorGuard::hide(term)?;
+
+        loop {
+            let capacity = page_capacity(term, self.max_length);
+            normalize_cursor(
+                visible_indexes.len(),
+                capacity,
+                &mut selected_visible_index,
+                &mut current_page,
+            );
+            render.render_multi_select(
+                self.prompt.as_deref(),
+                if search_mode { Some(&query) } else { None },
+                &self.items,
+                &visible_indexes,
+                &checked,
+                selected_visible_index,
+                current_page,
+                capacity,
+            )?;
+            term.flush()?;
+
+            match term.read_key()? {
+                Key::Char('/') if !search_mode => {
+                    search_mode = true;
+                    query.clear();
+                    visible_indexes = filtered_item_indexes(&self.items, &query);
+                    selected_visible_index = 0;
+                    current_page = 0;
+                }
+                Key::Escape if search_mode => {
+                    search_mode = false;
+                    query.clear();
+                    visible_indexes = filtered_item_indexes(&self.items, &query);
+                    selected_visible_index = 0;
+                    current_page = 0;
+                }
+                Key::Backspace if search_mode => {
+                    query.pop();
+                    visible_indexes = filtered_item_indexes(&self.items, &query);
+                    selected_visible_index = 0;
+                    current_page = 0;
+                }
+                Key::Char(character) if search_mode && !character.is_ascii_control() => {
+                    query.push(character);
+                    visible_indexes = filtered_item_indexes(&self.items, &query);
+                    selected_visible_index = 0;
+                    current_page = 0;
+                }
+                Key::ArrowDown | Key::Tab | Key::Char('j') if !visible_indexes.is_empty() => {
+                    selected_visible_index = (selected_visible_index + 1) % visible_indexes.len();
+                }
+                Key::ArrowUp | Key::BackTab | Key::Char('k') if !visible_indexes.is_empty() => {
+                    selected_visible_index = (selected_visible_index + visible_indexes.len() - 1)
+                        % visible_indexes.len();
+                }
+                Key::ArrowLeft | Key::Char('h')
+                    if page_count(visible_indexes.len(), capacity) > 1 =>
+                {
+                    let pages = page_count(visible_indexes.len(), capacity);
+                    current_page = (current_page + pages - 1) % pages;
+                    selected_visible_index = current_page * capacity;
+                }
+                Key::ArrowRight | Key::Char('l')
+                    if page_count(visible_indexes.len(), capacity) > 1 =>
+                {
+                    let pages = page_count(visible_indexes.len(), capacity);
+                    current_page = (current_page + 1) % pages;
+                    selected_visible_index = current_page * capacity;
+                }
+                Key::Char(' ') if !visible_indexes.is_empty() => {
+                    let original_index = visible_indexes[selected_visible_index];
+                    checked[original_index] = !checked[original_index];
+                }
+                Key::Char('a') => {
+                    if checked.iter().all(|&item_checked| item_checked) {
+                        checked.fill(false);
+                    } else {
+                        checked.fill(true);
+                    }
+                }
+                Key::Enter => {
+                    if self.clear {
+                        render.clear()?;
+                    }
+
+                    if let Some(ref prompt) = self.prompt {
+                        if self.report {
+                            let selections = checked
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, &is_checked)| {
+                                    is_checked.then_some(self.items[index].as_str())
+                                })
+                                .collect::<Vec<_>>();
+                            render.render_multi_select_selection(prompt, &selections)?;
+                        }
+                    }
+
+                    term.flush()?;
+
+                    return Ok(selected_item_indexes(&checked));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+struct CursorGuard<'a> {
+    term: &'a Term,
+}
+
+impl<'a> CursorGuard<'a> {
+    fn hide(term: &'a Term) -> Result<Self> {
+        term.hide_cursor()?;
+        Ok(Self { term })
+    }
+}
+
+impl Drop for CursorGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.term.show_cursor();
+        let _ = self.term.flush();
+    }
+}
+
+struct PromptRenderer<'a> {
+    term: &'a Term,
+    theme: &'a dyn Theme,
+    height: usize,
+}
+
+impl<'a> PromptRenderer<'a> {
+    fn new(term: &'a Term, theme: &'a dyn Theme) -> Self {
+        Self {
+            term,
+            theme,
+            height: 0,
+        }
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        if self.height > 0 {
+            self.term.clear_last_lines(self.height)?;
+            self.height = 0;
+        }
+
+        Ok(())
+    }
+
+    fn render_multi_select(
+        &mut self,
+        prompt: Option<&str>,
+        query: Option<&str>,
+        items: &[String],
+        visible_indexes: &[usize],
+        checked: &[bool],
+        selected_visible_index: usize,
+        current_page: usize,
+        capacity: usize,
+    ) -> Result<()> {
+        self.clear()?;
+
+        if let Some(prompt) = prompt {
+            self.write_formatted_line(|theme, buffer| {
+                let prompt = prompt_with_search(prompt, query);
+                theme.format_multi_select_prompt(buffer, &prompt)?;
+
+                let pages = page_count(visible_indexes.len(), capacity);
+                if pages > 1 {
+                    write!(buffer, " [Page {}/{}] ", current_page + 1, pages)?;
+                }
+
+                Ok(())
+            })?;
+        }
+
+        if visible_indexes.is_empty() {
+            self.write_line("  No matches")?;
+            return Ok(());
+        }
+
+        let page_start = current_page * capacity;
+        for visible_index in page_start..(page_start + capacity).min(visible_indexes.len()) {
+            let original_index = visible_indexes[visible_index];
+            self.write_formatted_line(|theme, buffer| {
+                theme.format_multi_select_prompt_item(
+                    buffer,
+                    &items[original_index],
+                    checked[original_index],
+                    selected_visible_index == visible_index,
+                )
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn render_multi_select_selection(&mut self, prompt: &str, selections: &[&str]) -> Result<()> {
+        self.write_formatted_line(|theme, buffer| {
+            theme.format_multi_select_prompt_selection(buffer, prompt, selections)
+        })
+    }
+
+    fn write_line(&mut self, line: &str) -> Result<()> {
+        self.term.write_line(line)?;
+        self.height += rendered_line_height(line, self.term);
+        Ok(())
+    }
+
+    fn write_formatted_line<F>(&mut self, format_line: F) -> Result<()>
+    where
+        F: FnOnce(&dyn Theme, &mut dyn fmt::Write) -> fmt::Result,
+    {
+        let mut buffer = String::new();
+        format_line(self.theme, &mut buffer)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        self.write_line(&buffer)
+    }
+}
+
+fn filtered_item_indexes(items: &[String], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (query.is_empty() || item.to_lowercase().contains(&query)).then_some(index)
+        })
+        .collect()
+}
+
+fn selected_item_indexes(checked: &[bool]) -> Vec<usize> {
+    checked
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_checked)| is_checked.then_some(index))
+        .collect()
+}
+
+fn prompt_with_search(prompt: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) => format!("{prompt} /{query}"),
+        None => prompt.to_string(),
+    }
+}
+
+fn page_capacity(term: &Term, max_length: Option<usize>) -> usize {
+    let rows = term.size().0 as usize;
+    max_length.unwrap_or(rows).min(rows).max(3) - 2
+}
+
+fn page_count(item_count: usize, capacity: usize) -> usize {
+    if item_count == 0 {
+        1
+    } else {
+        item_count.div_ceil(capacity)
+    }
+}
+
+fn normalize_cursor(
+    visible_count: usize,
+    capacity: usize,
+    selected_visible_index: &mut usize,
+    current_page: &mut usize,
+) {
+    if visible_count == 0 {
+        *selected_visible_index = 0;
+        *current_page = 0;
+        return;
+    }
+
+    *selected_visible_index = (*selected_visible_index).min(visible_count - 1);
+    *current_page = *selected_visible_index / capacity;
+}
+
+fn rendered_line_height(line: &str, term: &Term) -> usize {
+    let width = term.size().1.max(1) as usize;
+
+    line.split('\n')
+        .map(|line| measure_text_width(line).max(1).div_ceil(width))
+        .sum()
+}
+
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -601,6 +958,49 @@ mod tests {
         assert!(!is_sibling_search(&nested, temp.path()));
 
         Ok(())
+    }
+
+    #[test]
+    fn empty_filter_keeps_every_item_index() {
+        let items = vec![
+            "api-client".to_string(),
+            "shared-ui".to_string(),
+            "website".to_string(),
+        ];
+
+        assert_eq!(filtered_item_indexes(&items, ""), vec![0, 1, 2]);
+        assert_eq!(filtered_item_indexes(&items, "   "), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_matches_case_insensitive_substrings() {
+        let items = vec![
+            "api-client".to_string(),
+            "Shared-UI".to_string(),
+            "website".to_string(),
+        ];
+
+        assert_eq!(filtered_item_indexes(&items, "UI"), vec![1]);
+        assert_eq!(filtered_item_indexes(&items, "site"), vec![2]);
+    }
+
+    #[test]
+    fn filter_preserves_original_indexes() {
+        let items = vec![
+            "api-client".to_string(),
+            "shared-ui".to_string(),
+            "api-server".to_string(),
+        ];
+
+        assert_eq!(filtered_item_indexes(&items, "api"), vec![0, 2]);
+        assert_eq!(filtered_item_indexes(&items, "worker"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn selected_indexes_preserve_checked_items_when_filter_changes() {
+        let checked = vec![true, false, true, false];
+
+        assert_eq!(selected_item_indexes(&checked), vec![0, 2]);
     }
 
     #[test]

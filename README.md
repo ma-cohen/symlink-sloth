@@ -77,6 +77,8 @@ Remove selected symlinks from the current folder:
 sloth remove
 ```
 
+In interactive `add` and `remove` lists, press `/` to search, type to filter the list, press `Esc` to clear the search, and press `Space` to select items.
+
 Remove all symlinks from the current folder:
 
 ```sh
